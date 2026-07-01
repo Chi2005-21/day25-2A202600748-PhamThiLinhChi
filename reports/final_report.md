@@ -96,13 +96,21 @@ Ran the identical 4-scenario load test twice via `configs/default.yaml`
 
 | Metric | Without cache | With cache | Delta |
 |---|---:|---:|---|
-| latency_p50_ms | 265.32 | 236.32 | -29.00 ms (-10.9%) |
-| latency_p95_ms | 312.62 | 314.24 | +1.62 ms (noise — cache hits return in ~0ms, but P95 is dominated by cache-miss provider latency in both runs) |
-| estimated_cost | 0.263612 | 0.094912 | -0.1687 (-64%) |
-| cache_hit_rate | 0 | 0.6138 | +0.6138 |
+| latency_p50_ms | 265.32 | 272.56 | +7.24 ms (not meaningful — see note below) |
+| latency_p95_ms | 312.62 | 317.43 | +4.81 ms (not meaningful — see note below) |
+| estimated_cost | 0.263612 | 0.088154 | -0.175458 (-66.6%) |
+| cache_hit_rate | 0 | 0.555 | +0.555 |
 
-Availability was also materially better with cache enabled (0.8675 vs 0.7238) and
-`circuit_open_count` was much lower (14 vs 41) — cache hits never touch a provider or
+Note on latency: `run_scenario()` only appends a request's latency to the percentile
+sample when `latency_ms > 0`, and cache hits are recorded with `latency_ms=0` (see
+`gateway.py`'s cache-hit branch). So P50/P95 here are computed **only over the
+provider calls that still happened** — cache hits are excluded from the sample rather
+than pulling the percentiles down. That's why enabling the cache doesn't reduce the
+reported P50/P95 in this run; the latency benefit of a cache hit (~0ms vs ~200-260ms)
+is real per-request but isn't visible in these two aggregate percentile numbers. The
+cache's benefit shows up in **cost** (-66.6%) and in **availability/circuit stability**
+instead: availability was materially better with cache enabled (0.8 vs 0.7238) and
+`circuit_open_count` was much lower (17 vs 41) — cache hits never touch a provider or
 its breaker, so fewer live requests means fewer chances to accumulate failures and trip
 a breaker.
 
@@ -159,21 +167,21 @@ rl:cache:98332d0d1c9c
 
 | Metric | In-memory cache | Redis cache | Notes |
 |---|---:|---:|---|
-| latency_p50_ms | 236.32 | 271.12 | Redis adds a network round-trip per cache lookup/write; still well under the 2500ms P95 SLO |
-| latency_p95_ms | 314.24 | 315.04 | Effectively identical at P95 — dominated by cache-miss provider latency in both cases |
+| latency_p50_ms | 272.56 | 271.12 | Both computed only over non-cache-hit (provider) calls — see the latency note in Section 5; not a clean measurement of Redis round-trip cost |
+| latency_p95_ms | 317.43 | 315.04 | Effectively identical at P95 — dominated by cache-miss provider latency in both cases |
 
-Redis-backed run also had the highest cache_hit_rate (72.5% vs 61.4% in-memory) and
-lowest cost (0.0747 vs 0.0949) in this sample — plausible since Redis persisted entries
+Redis-backed run also had the highest cache_hit_rate (72.5% vs 55.5% in-memory) and
+lowest cost (0.0747 vs 0.0882) in this sample — plausible since Redis persisted entries
 across the whole 800-request run with no per-process fragmentation, but this single
 run isn't enough to attribute the difference purely to the backend versus random query
-ordering.
+ordering (each run picks random queries from the same 20-query pool).
 
 ## 7. Chaos scenarios
 
 | Scenario | Expected behavior | Observed behavior | Pass/Fail |
 |---|---|---|---|
 | primary_timeout_100 | All traffic fallback to backup, circuit opens | Primary breaker opened; ~94-98% of requests succeeded via backup (`route=fallback`), remainder hit backup's own baseline 5% failures during its brief OPEN windows | Pass |
-| primary_flaky_50 | Circuit oscillates, mix of primary and fallback | Primary breaker opened and closed multiple times across the run (contributes to the 14 total circuit_open events); requests routed to both `primary` and `fallback` depending on breaker state at call time | Pass |
+| primary_flaky_50 | Circuit oscillates, mix of primary and fallback | Primary breaker opened and closed multiple times across the run (contributes to the 17 total circuit_open events in `reports/metrics.json`); requests routed to both `primary` and `fallback` depending on breaker state at call time | Pass |
 | all_healthy | All requests via primary, no circuit opens | 0 circuit-open events, all requests routed `primary`, ~100% availability in isolation | Pass |
 | both_providers_degraded (custom) | Primary and backup both fail 60% of calls — expect both breakers to trip and most/all traffic to land on the static fallback message rather than erroring | Both breakers opened; in an isolated run 100/100 requests received the static degraded message (0 successful provider responses) — the gateway degraded gracefully instead of raising | Pass |
 
